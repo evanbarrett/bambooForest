@@ -1,0 +1,205 @@
+
+# importing libraries
+import pandas as pd
+import numpy as np
+!pip install pysal
+import matplotlib.pyplot as plt
+from pysal.explore import esda
+from pysal.lib import weights
+
+from google.colab import auth
+auth.authenticate_user()
+
+import gspread
+from google.auth import default
+creds, _ = default()
+
+gc = gspread.authorize(creds)
+
+
+accumulationData = gc.open('BambooForestAccumulation').sheet1
+rows = accumulationData.get_all_values()
+accumulationDF = pd.DataFrame(rows[1:], columns=rows[0])
+
+# Convert to numeric type
+for column in accumulationDF.columns[1:]:
+  accumulationDF[column] = pd.to_numeric(accumulationDF[column], errors='coerce')
+
+accumulationDF = accumulationDF.truncate(after=120)
+custom_order = {'A': 1, 'B': 2, 'C': 3, 'D': 4, 'E': 5, 'F': 6, 'G': 7, 'H': 8, 'I': 9, 'J': 10, 'K': 11}
+
+# Split stake columns
+accumulationDF[['Letters', 'Numbers']] = accumulationDF['stake'].str.extract('([A-Za-z]+)([0-9]+)')
+
+# Convert the 'Letters' column to corresponding numbers
+accumulationDF['Letters'] = accumulationDF['Letters'].map(custom_order)
+
+# convert the 'Numbers' column to numeric type
+accumulationDF['Numbers'] = pd.to_numeric(accumulationDF['Numbers'])
+
+accumulationDF.insert(0,'Numbers',accumulationDF.pop('Numbers'))
+accumulationDF.insert(0,'Letters',accumulationDF.pop('Letters'))
+accumulationDF.drop(['stake'],axis=1,inplace=True)
+
+# Convert column names to datetime format 
+accumulationDF.columns = ['Letters', 'Numbers'] + pd.to_datetime(accumulationDF.columns[2:]).tolist()
+
+letters = accumulationDF['Letters']
+numbers = accumulationDF['Numbers']
+data = accumulationDF.iloc[:, 2:]
+data.columns = pd.to_datetime(data.columns)
+
+# Filter columns to only include December data across all years (adjust month as needed)
+monthlyData = data.loc[:, data.columns.month == 12] # here the month is 12 = December
+
+# Calculate the sum of monthly accumulation values
+monthlyYearlySums = monthlyData.groupby(monthlyData.columns.year, axis=1).sum()
+
+# Average these sums across all years
+monthlyMeanAcrossYears = monthlyYearlySums.mean(axis=1)
+
+averageAccumulation = monthlyMeanAcrossYears.mean()
+stdDeviation = monthlyMeanAcrossYears.std()
+
+
+
+letter_to_number = {letter: i + 1 for i, letter in enumerate(sorted(letters.unique()))}
+x = letters.map(letter_to_number) 
+y = numbers 
+
+# Create a scatter plot for the month
+plt.figure(figsize=(10, 8))
+sc = plt.scatter(x, y, c=december_mean_across_years, cmap='viridis', marker='o', s=200, vmin=average_accumulation - 1*std_deviation, vmax=average_accumulation + 1*std_deviation)
+plt.colorbar(sc, label='Average Accumulation (cm)')
+plt.title('Average Snow Accumulation in December 2003-2023', fontsize=16) # replace with whatever month
+y_ticks = np.arange(min(y), max(y)+1, 1)
+y_labels = [str(int(tick)) for tick in y_ticks]
+plt.yticks(y_ticks, y_labels)
+x_labels = {1: 'A', 2: 'B', 3: 'C', 4: 'D', 5: 'E', 6: 'F', 7: 'G', 8: 'H', 9: 'I', 10: 'J', 11: 'K'}
+plt.xticks(list(x_labels.keys()), list(x_labels.values()))
+plt.ylim(1 - 0.5, 11 + 0.5)
+plt.grid(False)
+plt.show()
+
+# Map each month to its respective meteorological season
+month_to_season = {
+    1: 'DJF', 2: 'DJF', 12: 'DJF',
+    3: 'MAM', 4: 'MAM', 5: 'MAM',
+    6: 'JJA', 7: 'JJA', 8: 'JJA',
+    9: 'SON', 10: 'SON', 11: 'SON'
+}
+
+# Extract month and year from column names and map to season
+months = data.index.month
+years = data.index.year
+
+data['season'] = months.map(month_to_season)
+data['season_year'] = np.where(months == 12, years + 1, years)
+data['year'] = years
+
+# Filter columns to only include season data
+season_data = data.loc[data['season'] == 'DJF'] # season here is DJF
+
+# Calculate the sum of accumulation values for season
+seasonSums = seasonData.groupby('season_year').sum()
+
+# Average these sums across all years
+seasonMean = seasonSums.iloc[:, :-2].mean()
+
+# Calculate the overall average and standard deviation 
+averageAccumulation = seasonMean.mean()
+stdDeviation = seasonMean.std()
+
+letter_to_number = {letter: i + 1 for i, letter in enumerate(sorted(letters.unique()))}
+x = letters.map(letter_to_number)  # Map letters to numbers for x-axis
+y = numbers  
+
+# Create a scatter plot for December
+plt.figure(figsize=(10, 8))
+sc = plt.scatter(x, y, c=djf_mean, cmap='viridis', marker='o', s=200, vmin=average_accumulation - std_deviation, vmax=average_accumulation + std_deviation)
+plt.colorbar(sc, label='Average Accumulation (cm)')
+plt.title('Average Snow Accumulation in JJA', fontsize=16)
+y_ticks = np.arange(min(y), max(y) + 1, 1)
+y_labels = [str(int(tick)) for tick in y_ticks]
+plt.yticks(y_ticks, y_labels)
+x_labels = {1: 'A', 2: 'B', 3: 'C', 4: 'D', 5: 'E', 6: 'F', 7: 'G', 8: 'H', 9: 'I', 10: 'J', 11: 'K'}
+plt.xticks(list(x_labels.keys()), list(x_labels.values()))
+plt.ylim(1 - 0.5, 11 + 0.5)
+plt.grid(False)
+plt.show()
+
+## Moran's I
+# Create spatial coordinates
+coords = list(zip(x, y))
+
+# Create spatial weights matrix
+w = weights.lat2W(11, 11)  # 11x11 grid
+averageAccumulationNumeric = seasonMean.values.astype(float)
+
+# Calculate Moran's I
+moran = esda.Moran(averageAccumulationNumeric, w)
+print(moran.I)
+
+
+
+
+## Monthly Accumulation Maps
+accumulationDF.columns = ['Letters', 'Numbers'] + pd.to_datetime(accumulationDF.columns[2:]).tolist()
+data = accumulationDF.iloc[:, 2:]
+data.columns = pd.to_datetime(data.columns)
+
+
+monthlyData = pd.DataFrame(index=data.index)
+
+# Loop through each month (1 to 12) and calculate the mean for each month across all years
+for month in range(1, 13):
+    # Filter columns for the specific month across all years
+    monthData = data.loc[:, data.columns.month == month]
+
+    # Calculate the mean across columns
+    monthlyData[f'Month_{month}'] = month_data.mean(axis=1)
+
+
+plotData = monthlyData.melt(var_name='Month', value_name='Average Accumulation')
+
+# Plotting
+plt.figure(figsize=(12, 8))
+sns.boxplot(x='Month', y='Average Accumulation', data=plotData, palette="Blues", showfliers=False)
+
+# Set plot title and labels
+plt.title('Monthly Average Snow Accumulation')
+plt.xlabel('Month')
+plt.ylabel('Average Accumulation (cm)')
+month_names = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+plt.xticks(ticks=range(0, 12), labels=month_names)
+plt.show()
+
+
+dailyMeans = accumulationDF.iloc[:, 2:].mean(axis=0)
+deviationDF = abs(accumulationDF.iloc[:, 2:] - dailyMeans)
+deviationDF = pd.concat([accumulationDF[['Letters', 'Numbers']], deviationDF], axis=1)
+y = deviationDF.iloc[0:122,:]['Numbers']
+x = deviationDF.iloc[0:122,:]['Letters']
+
+
+## Max Deviation
+# Calculate the maximum deviation per date
+maxDeviations = deviationDF.iloc[:, 2:].max()
+isMaxDeviation = deviationDF.iloc[:, 2:].apply(lambda x: x >= x.nlargest(5).min(), axis=0) # the largest(n) means we are looking at the top n stakes when sorted by deviation
+
+# Sum up the True values per stake
+maxCountPerStake = isMaxDeviation.sum(axis=1)
+
+plt.figure(figsize=(10, 8))
+sc = plt.scatter(deviationDF['Letters'], deviationDF['Numbers'], c=maxCountPerStake, cmap='Greens', marker='o', s=200) 
+cbar = plt.colorbar(sc)
+cbar.set_label('Counts of Maximum Deviations')
+y_ticks = np.arange(min(y), max(y)+1, 1)
+y_labels = [str(int(tick)) for tick in y_ticks]
+plt.yticks(y_ticks, y_labels)
+x_labels = {1: 'A', 2: 'B', 3: 'C', 4: 'D', 5: 'E', 6: 'F', 7: 'G', 8: 'H', 9: 'I', 10: 'J', 11: 'K'}
+plt.xticks(list(x_labels.keys()), list(x_labels.values()))
+plt.ylim(max(y)+0.5, min(y)-0.5)
+plt.title('Times each stake was in the top 5 of max deviations')
+plt.gca().invert_yaxis()
+plt.show()
