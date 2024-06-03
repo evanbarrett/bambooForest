@@ -1,0 +1,77 @@
+# Most of this became 'Multivariate Analysis', so much of the code is in that file
+# importing libraries
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from statsmodels.tsa.seasonal import seasonal_decompose
+
+from google.colab import auth
+auth.authenticate_user()
+
+import gspread
+from google.auth import default
+creds, _ = default()
+
+gc = gspread.authorize(creds)
+
+# Convert columns to numeric data
+for column in accumulationDF.columns[1:]:
+  accumulationDF[column] = pd.to_numeric(accumulationDF[column], errors='coerce')
+
+accumulationDF = accumulationDF.truncate(after=120)
+daily_averages = accumulationDF.iloc[:, 1:].mean()  # Mean of each column starting from the second
+
+
+# Set index to the date
+dates = daily_averages.index
+dates = pd.to_datetime(dates, errors='coerce')
+daily_averages.index = pd.to_datetime(daily_averages.index) 
+dailyAvgDF = pd.DataFrame(daily_averages, index=dates)
+dailyAvgDF.columns = ['Average Accumulation']
+
+# Plotting
+plt.figure(figsize=(15, 5))  
+plt.scatter(dates, daily_averages, marker='o', linestyle='-')
+plt.title('Average Accumulation Over Time') 
+plt.xlabel('Date')  
+plt.ylabel('Average Accumulation (cm)') 
+plt.grid(True)  # Enable grid
+plt.xticks(rotation=45) 
+plt.tight_layout()  
+plt.show()
+
+# Group data by year and month
+grouped = dailyAvgDF.groupby([dailyAvgDF.index.year, dailyAvgDF.index.month])
+# Calculate descriptive statistics 
+monthly_stats = grouped.describe()
+
+# map each month to its meteorological season
+def get_season(month):
+    if month in [12, 1, 2]:
+        return 'DJF'
+    elif month in [3, 4, 5]:
+        return 'MAM'
+    elif month in [6, 7, 8]:
+        return 'JJA'
+    elif month in [9, 10, 11]:
+        return 'SON'
+
+# add a 'Season' column based on the month
+months = dailyAvgDF.index.month
+dailyAvgDF['Season'] = months.map(get_season)
+dailyAvgDF['Year'] = dailyAvgDF.index.year
+dailyAvgDF['Season_Year'] = np.where(months == 12, years + 1, years) 
+
+# Group by 'Season_Year' and 'Season'
+grouped = dailyAvgDF.groupby(['Season_Year', 'Season'])
+
+# Decompose the time series data
+result = seasonal_decompose(dailyAvgDF['Average Accumulation'].dropna(), model='additive', period=365)
+
+# Plot the trend component
+plt.figure(figsize=(12, 6))  # Adjust the size to fit your needs
+plt.plot(result.trend, label='Trend')
+plt.title('Snow Accumulation Trend')
+plt.xlabel('Date')
+plt.ylabel('Accumulation (cm)')
+plt.show()
