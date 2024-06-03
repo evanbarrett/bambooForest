@@ -1,0 +1,252 @@
+import numpy as np
+import pandas as pd
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.metrics import mean_squared_error
+from sklearn.model_selection import train_test_split
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+## Connect Google drive with Colab
+from google.colab import drive
+drive.mount('/content/drive')
+
+from google.colab import auth
+auth.authenticate_user()
+
+import gspread
+from google.auth import default
+creds, _ = default()
+
+gc = gspread.authorize(creds)
+
+# import meteorological data from NOAA
+noaaCSV = '/content/drive/My Drive/Thesis/Data/noaaMeteorology.csv'
+meteorologyDF = pd.read_csv(noaaCSV)
+meteorologyDF.drop(meteorologyDF.columns[0], axis=1, inplace=True)
+meteorologyDF['Date'] = pd.to_datetime(meteorologyDF[['Year', 'Month', 'Day']])
+
+# replace 'no measurement' data with NaN
+meteorologyDF.replace({
+    'Wind Direction': -999,
+    'Wind Speed': [-99.9,-999.9],
+    'Wind Steadiness Factor': -9,
+    'Barometric Pressure': -999.90,
+    '2m Temperature': -999.9,
+    '10m Temperature': -999.9,
+    'TopTemperature': -999.9,
+    'Relative Humidity': -99.0,
+    'Precipitation Intensity': -99
+}, np.nan, inplace=True)
+meteorologyDF.loc[meteorologyDF['Relative Humidity'] > 100, 'Relative Humidity'] = np.nan
+
+meteorologyDF = meteorologyDF.groupby('Date').mean() # Take the average of daily measurements
+meteorologyDF.drop(columns=['Year', 'Month','Hour','Day','10m Temperature','TopTemperature','Precipitation Intensity'], inplace=True)
+
+# GBI Data
+gbiCSV = '/content/drive/My Drive/Thesis/Data/GBI Data.csv'
+gbiDF = pd.read_csv(gbiCSV)
+gbiDF['Date'] = pd.to_datetime(gbiDF['Date'])
+gbiDF.set_index('Date', inplace=True)
+
+# POSS Data
+possData = gc.open('POSSdata').sheet1
+rows = possData.get_all_values()
+possDF = pd.DataFrame(rows[1:], columns=rows[0])
+
+for column in possDF.columns[1:]:
+  possDF[column] = pd.to_numeric(possDF[column], errors='coerce')
+
+# set 'date' column to datetime format and then index
+if not pd.api.types.is_datetime64_any_dtype(possDF['Date']):
+    possDF['Date'] = pd.to_datetime(possDF['Date'])
+possDF.set_index('Date', inplace=True)
+
+# accumulation data
+worksheet = gc.open('BambooForestAccumulation').sheet1
+rows = worksheet.get_all_values()
+accumulationDF = pd.DataFrame(rows[1:], columns=rows[0])
+
+for column in accumulationDF.columns[1:]:
+  accumulationDF[column] = pd.to_numeric(accumulationDF[column], errors='coerce')
+
+stake_rows = accumulationDF.iloc[0:121]
+
+mean_df = stake_rows.iloc[:, 1:].mean().to_frame(name='Accumulation')
+mean_df.index = pd.to_datetime(mean_df.index)
+
+intersecting_indices = mean_df.index.intersection(meteorologyDF.index)
+intersecting_indices = intersecting_indices.intersection(possDF.index)
+intersecting_indices = intersecting_indices.intersection(gbiDF.index)
+intersecting_indices = intersecting_indices.intersection(oscillationDailyDF.index)
+
+mean_df = mean_df.loc[intersecting_indices]
+meteorologyDF = meteorologyDF.loc[intersecting_indices]
+possDF = possDF.loc[intersecting_indices]
+oscillationDailyDF = oscillationDailyDF.loc[intersecting_indices]
+gbiDF = gbiDF.loc[intersecting_indices]
+
+
+combinedMeteorologyDF = pd.concat([mean_df,possDF[['Total_LWC', 'Total S', 'Total R', 'Total P', 'Total L', 'C']], meteorologyDF.drop(columns=['Wind Direction']), gbiDF, oscillationDailyDF], axis=1)
+
+# Calculate the rolling average
+meteorologyDF['2m Temp (5 Day Average)'] = meteorologyDF['2m Temperature'].rolling(window=5, closed='left').mean()
+meteorologyDF['Relative Humidity (5 Day Average)'] = meteorologyDF['Relative Humidity'].rolling(window=5, closed='left').mean()
+meteorologyDF['Wind Speed (5 Day Average)'] = meteorologyDF['Wind Speed'].rolling(window=5, closed='left').mean()
+meteorologyDF['Barometric Pressure (5 Day Average)'] = meteorologyDF['Barometric Pressure'].rolling(window=5, closed='left').mean()
+meteorologyDF['Wind Steadiness (5 Day Average)'] = meteorologyDF['Wind Steadiness Factor'].rolling(window=5, closed='left').mean()
+
+# add to df
+combinedMeteorologyDF['2m Temp (5 Day Average)'] = meteorologyDF.loc[combinedMeteorologyDF.index, '2m Temp (5 Day Average)']
+combinedMeteorologyDF['Relative Humidity (5 Day Average)'] = meteorologyDF.loc[combinedMeteorologyDF.index, 'Relative Humidity (5 Day Average)']
+combinedMeteorologyDF['Wind Speed (5 Day Average)'] = meteorologyDF.loc[combinedMeteorologyDF.index, 'Wind Speed (5 Day Average)']
+combinedMeteorologyDF['Barommetric Pressure (5 Day Average)'] = meteorologyDF.loc[combinedMeteorologyDF.index, 'Barometric Pressure (5 Day Average)']
+combinedMeteorologyDF['Wind Steadiness (5 Day Average)'] = meteorologyDF.loc[combinedMeteorologyDF.index, 'Wind Steadiness (5 Day Average)']
+
+# gbi rolling average
+gbiDF['GBI (5 Day Average)'] = gbiDF['GBI'].rolling(window=5,closed='left').mean()
+combinedMeteorologyDF['GBI (5 Day Average)'] = gbiDF.loc[combinedMeteorologyDF.index, 'GBI (5 Day Average)']
+
+combinedMeteorologyDF.dropna(inplace=True)
+combinedMeteorologyDF.rename(columns={'Total_LWC': 'Total Liquid Water Content',
+                                      'Total S': 'Total Snow Occurrences',
+                                      'Total R': 'Total Rain Occurrences',
+                                      'Total P': 'Total Snow Pellets Occurrences',
+                                      'Total L': 'Total Drizzle Occurrences',
+                                      'C': 'Total No Precipitation Occurrences',
+                                      'GBI': 'Greenland Blocking Index',
+                                      'NAO': 'North Atlantic Oscillation',
+                                      'AO': 'Arctic Oscillation'
+                                      }, inplace=True)
+
+# Standardizing data
+from sklearn.preprocessing import StandardScaler
+scaler = StandardScaler()
+scaled_features = scaler.fit_transform(combinedMeteorologyDF[combinedMeteorologyDF.columns.difference(['Date'])])  # Exclude non-feature column
+scaled_DF = pd.DataFrame(scaled_features, columns=combinedMeteorologyDF.columns.difference(['Date']))
+
+scaled_DF.dropna(inplace=True)
+
+cutoff_index = int(len(combinedMeteorologyDF) * 0.8)
+# Get the corresponding cutoff date
+cutoff_date = combinedMeteorologyDF.index[cutoff_index]
+
+# Splitting the DataFrame by date
+train_df = combinedMeteorologyDF[combinedMeteorologyDF.index <= cutoff_date]
+test_df = combinedMeteorologyDF[combinedMeteorologyDF.index > cutoff_date]
+
+# Assuming 'X' and 'y' are columns in your DataFrame
+X_train = train_df.drop(columns=['Accumulation'])  # Replace 'y' with your target variable column name
+y_train = train_df['Accumulation']
+X_test = test_df.drop(columns=['Accumulation'])
+y_test = test_df['Accumulation']
+
+X_train_array = X_train.values
+X_test_array = X_test.values
+
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_squared_error
+from sklearn.model_selection import cross_val_score
+
+
+# Training the RandomForest model
+rfModel = RandomForestRegressor(n_estimators=400, min_samples_split=20, min_samples_leaf=4,
+                                      max_features='sqrt', max_depth=50, bootstrap=True, random_state=42)
+rfModel.fit(X_train, y_train)
+
+# Making predictions
+y_pred = rfModel.predict(X_test)
+
+# Evaluating the model
+from sklearn.metrics import mean_squared_error
+mse_rf = mean_squared_error(y_test, y_pred)
+print("Random Forest Mean Squared Error:", mse_rf)
+
+# Get feature importances
+importances = rfModel.feature_importances_
+feature_names = X_test.columns
+
+# Create a DataFrame to view the importances
+importances_df = pd.DataFrame({'Feature': feature_names, 'Importance': importances})
+importances_df = importances_df.sort_values(by='Importance', ascending=False)
+
+# Display the feature importance
+print(importances_df)
+
+# Optionally, plot the feature importances
+import seaborn as sns
+import matplotlib.pyplot as plt
+
+sns.barplot(x='Importance', y='Feature', data=importances_df)
+plt.title('Feature Importance')
+plt.show()
+
+
+from sklearn.inspection import permutation_importance
+
+# Perform permutation importance
+results = permutation_importance(rfModel, X, y, n_repeats=10, random_state=42, n_jobs=-1)
+perm_importances = results.importances_mean
+
+# Create a df
+perm_importances_df = pd.DataFrame({'Feature': feature_names, 'Importance': perm_importances})
+perm_importances_df = perm_importances_df.sort_values(by='Importance', ascending=False)
+
+sns.barplot(x='Importance', y='Feature', data=perm_importances_df)
+plt.title('Permutation Importance')
+plt.show()
+
+# Display the permutation importance
+print(perm_importances_df)
+
+
+residuals = y_pred - y_test
+
+# Create a figure and axis object
+fig, ax = plt.subplots(figsize=(10, 6))
+
+# Plot actual values as dots
+ax.scatter(y_test.index, y_test, label='Actual', color='black', marker='o')
+
+# Plot predicted values as dots
+ax.scatter(y_test.index, y_pred, label='Predicted', color='green', marker='o')
+
+# Plot residuals as thinner red lines connecting dots
+for date, actual, predicted, residual in zip(y_test.index, y_test, y_pred, residuals):
+    ax.plot([date, date], [actual, predicted], color='red', linestyle='-', linewidth=0.5)
+
+# Plot a 75% transparent grey line connecting the actual values
+ax.plot(y_test.index, y_pred, color='green', alpha=0.75)
+
+
+# Add a horizontal line at y=0 for reference
+ax.axhline(y=0, color='black', linestyle='--')
+
+# Set labels and title
+ax.set_xlabel('Date')
+ax.set_ylabel('Accumulation')
+ax.set_title('Actual vs. Predicted Accumulation')
+
+# Add legend
+ax.legend(fontsize='large',loc='upper left')
+
+# Show plot
+plt.tight_layout()
+plt.show()
+
+
+
+
+# Assuming combinedMeteorologyDF is the DataFrame that contains 'Accumulation' and other variables
+
+# Compute the correlation matrix
+spearmanCorr = combinedMeteorologyDF.corr(method='spearman')
+
+
+# Plot the heatmap
+plt.figure(figsize=(20, 16))
+sns.heatmap(spearmanCorr, annot=True, cmap='coolwarm', vmin=-0.25, vmax=0.25, annot_kws={"size": 10, "fontweight": "bold"})
+plt.yticks(fontsize=12)
+plt.xticks(fontsize=12, rotation=45, ha='right')
+plt.title('Spearman Correlation Heatmap')
+plt.show()
