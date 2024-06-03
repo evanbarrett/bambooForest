@@ -1,0 +1,241 @@
+import numpy as np
+import pandas as pd
+import tensorflow as tf
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense, Dropout, Bidirectional
+from tensorflow.keras.callbacks import EarlyStopping
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.metrics import mean_squared_error
+from sklearn.model_selection import train_test_split
+import matplotlib.pyplot as plt
+
+from google.colab import drive
+drive.mount('/content/drive')
+
+from google.colab import auth
+auth.authenticate_user()
+
+import gspread
+from google.auth import default
+creds, _ = default()
+
+gc = gspread.authorize(creds)
+
+noaaCSV = '/content/drive/My Drive/Thesis/Data/noaaMeteorology.csv'
+
+meteorologyDF = pd.read_csv(noaaCSV)
+meteorologyDF.drop(meteorologyDF.columns[0], axis=1, inplace=True)
+
+meteorologyDF['Date'] = pd.to_datetime(meteorologyDF[['Year', 'Month', 'Day']])
+
+meteorologyDF.replace({
+    'Wind Direction': -999,
+    'Wind Speed': [-999.9,-99.9],
+    'Wind Steadiness Factor': -9,
+    'Barometric Pressure': -999.90,
+    '2m Temperature': -999.9,
+    '10m Temperature': -999.9,
+    'TopTemperature': -999.9,
+    'Relative Humidity': -99,
+    'Precipitation Intensity': -99
+}, np.nan, inplace=True)
+
+meteorologyDF.loc[meteorologyDF['Relative Humidity'] > 100, 'Relative Humidity'] = np.nan
+
+meteorologyDF = meteorologyDF.groupby('Date').mean()
+
+meteorologyDF.drop(columns=['Year', 'Month','Hour','Day','10m Temperature','TopTemperature','Precipitation Intensity'], inplace=True)
+
+# accumulation data
+worksheet = gc.open('BambooForestAccumulation').sheet1
+rows = worksheet.get_all_values()
+accumulationDF = pd.DataFrame(rows[1:], columns=rows[0])
+
+for column in accumulationDF.columns[1:]:
+  accumulationDF[column] = pd.to_numeric(accumulationDF[column], errors='coerce')
+
+stake_rows = accumulationDF.iloc[0:121]
+
+def process_trial(trial_number, data, pattern):
+    # Filter the data
+    filtered_df = stake_rows[stake_rows['stake'].str.contains(pattern)]
+
+    # Calculate the mean of the filtered data, excluding the first column (usually a non-numeric column)
+    mean_values = filtered_df.iloc[:, 1:].mean()
+
+    # Create a DataFrame from the mean values
+    mean_values_df = pd.DataFrame(mean_values, columns=[f'Trial {trial_number}'])
+
+    # Return the DataFrame with the mean values
+    return mean_values_df
+
+mean_df = pd.DataFrame()
+
+# 121 Stakes
+trial_number = 0
+pattern = 'A|B|C|D|E|F|G|H|I|J|K'
+mean_values_df = process_trial(trial_number, stake_rows, pattern)
+mean_df = pd.concat([mean_df, mean_values_df], axis=1)
+mean_df.index = pd.to_datetime(mean_df.index)
+
+# NAO and AO Data
+oscillationCSV = '/content/drive/My Drive/Thesis/Data/NAO and AO Data.csv'
+oscillationDF = pd.read_csv(oscillationCSV)
+
+oscillationDF['Date'] = pd.to_datetime(oscillationDF['Date'])
+
+# Set the 'date' column as index
+oscillationDF.set_index('Date', inplace=True)
+oscillationDailyDF = oscillationDF.resample('D').ffill()
+oscillationDailyDF=oscillationDailyDF.iloc[:-1]
+
+
+# GBI Data
+gbiCSV = '/content/drive/My Drive/Thesis/Data/GBI Data.csv'
+gbiDF = pd.read_csv(gbiCSV)
+
+gbiDF['Date'] = pd.to_datetime(gbiDF['Date'])
+
+# Set the 'date' column as index
+gbiDF.set_index('Date', inplace=True)
+
+# POSS Data
+possData = gc.open('POSSdata').sheet1
+rows = possData.get_all_values()
+possDF = pd.DataFrame(rows[1:], columns=rows[0])
+
+for column in possDF.columns[1:]:
+  possDF[column] = pd.to_numeric(possDF[column], errors='coerce')
+
+# ensure the 'date' column is in datetime format
+if not pd.api.types.is_datetime64_any_dtype(possDF['Date']):
+    possDF['Date'] = pd.to_datetime(possDF['Date'])
+
+possDF.set_index('Date', inplace=True)
+
+intersecting_indices = mean_df.index.intersection(meteorologyDF.index)
+intersecting_indices = intersecting_indices.intersection(possDF.index)
+intersecting_indices = intersecting_indices.intersection(gbiDF.index)
+intersecting_indices = intersecting_indices.intersection(oscillationDailyDF.index)
+
+mean_df = mean_df.loc[intersecting_indices]
+meteorologyDF = meteorologyDF.loc[intersecting_indices]
+possDF = possDF.loc[intersecting_indices]
+oscillationDailyDF = oscillationDailyDF.loc[intersecting_indices]
+gbiDF = gbiDF.loc[intersecting_indices]
+
+
+new_df = pd.DataFrame(index=intersecting_indices)
+
+meteorologyDF = meteorologyDF.groupby(meteorologyDF.index).mean()
+
+# Add oscillation data
+new_df['NAO'] = oscillationDailyDF.loc[new_df.index, 'NAO']
+new_df['AO'] = oscillationDailyDF.loc[new_df.index, 'AO']
+
+# Add GBI data
+new_df['GBI'] = gbiDF.loc[new_df.index, 'GBI']
+
+# Add all POSS data columns
+new_df['Total_LWC'] = possDF.loc[new_df.index, 'Total_LWC']
+new_df['Total S'] = possDF.loc[new_df.index, 'Total S']
+new_df['Total R'] = possDF.loc[new_df.index, 'Total R']
+new_df['Total P'] = possDF.loc[new_df.index, 'Total P']
+new_df['Total L'] = possDF.loc[new_df.index, 'Total L']
+new_df['Total C'] = possDF.loc[new_df.index, 'C']
+
+
+
+for column in meteorologyDF.columns[1:]:
+  new_df[column] = pd.to_numeric(meteorologyDF[column], errors='coerce')
+
+new_df.interpolate(method='linear', inplace=True)
+
+
+dataAll = new_df.join(mean_df, how='inner')
+dataAll.rename(columns={'Trial 0': 'Accumulation'}, inplace=True)
+dataAll.drop(dataAll.index[0])
+
+# Scaling the features and target separately
+scaler_features = MinMaxScaler(feature_range=(0, 1))
+scaler_target = MinMaxScaler(feature_range=(0, 1))
+
+# Fit the scalers on the respective data
+scaled_features = scaler_features.fit_transform(dataAll.drop(columns=['Accumulation']))
+scaled_target = scaler_target.fit_transform(dataAll[['Accumulation']])
+
+# Combine scaled features and target for consistent processing
+scaled_data = np.hstack((scaled_features, scaled_target))
+
+# Split the data into training and testing sets
+train_size = int(len(scaled_data) * 0.8)
+test_size = len(scaled_data) - train_size
+train, test = scaled_data[:train_size], scaled_data[train_size:]
+
+def create_dataset(dataset, look_back=1):
+    X, Y = [], []
+    for i in range(len(dataset) - look_back):
+        a = dataset[i:(i + look_back), :-1]
+        X.append(a)
+        Y.append(dataset[i + look_back, -1])
+    return np.array(X), np.array(Y)
+
+# Define look_back and create datasets
+look_back = 3
+X_train, y_train = create_dataset(train, look_back)
+X_test, y_test = create_dataset(test, look_back)
+
+# Define the LSTM model
+model = Sequential()
+model.add(LSTM(units=100, return_sequences=True, input_shape=(X_train.shape[1], X_train.shape[2])))
+model.add(Dropout(0.2))
+model.add(LSTM(units=100))
+model.add(Dropout(0.2))
+model.add(Dense(units=1))
+
+# Compile & train the model
+model.compile(optimizer='adam', loss='mean_squared_error')
+history = model.fit(X_train, y_train, epochs=200, batch_size=32, validation_data=(X_test, y_test), verbose=1)
+
+# Evaluate the model
+train_score = model.evaluate(X_train, y_train, verbose=0)
+print('Train Score:', train_score)
+test_score = model.evaluate(X_test, y_test, verbose=0)
+print('Test Score:', test_score)
+
+# Make predictions
+train_predict = model.predict(X_train)
+test_predict = model.predict(X_test)
+
+# Reshape predictions to match the original scaled data shape
+train_predict = train_predict.reshape(-1, 1)
+y_train = y_train.reshape(-1, 1)
+test_predict = test_predict.reshape(-1, 1)
+y_test = y_test.reshape(-1, 1)
+
+# Invert predictions
+train_predict = scaler_target.inverse_transform(np.concatenate((train_predict, np.zeros((train_predict.shape[0], scaled_data.shape[1]-1))), axis=1))[:,0]
+y_train = scaler_target.inverse_transform(np.concatenate((y_train, np.zeros((y_train.shape[0], scaled_data.shape[1]-1))), axis=1))[:,0]
+
+test_predict = scaler_target.inverse_transform(np.concatenate((test_predict, np.zeros((test_predict.shape[0], scaled_data.shape[1]-1))), axis=1))[:,0]
+y_test = scaler_target.inverse_transform(np.concatenate((y_test, np.zeros((y_test.shape[0], scaled_data.shape[1]-1))), axis=1))[:,0]
+
+
+# Plot the results
+plt.figure(figsize=(15, 6))
+
+# Plot training data
+plt.plot(dataAll.index[:len(y_train)], y_train, color='lightgray', label='Actual (Train)')
+plt.plot(dataAll.index[:len(train_predict)], train_predict, color='black', label='Predicted (Train)')
+
+# Plot testing data
+plt.plot(dataAll.index[len(y_train)+look_back+1:len(y_train)+look_back+1+len(y_test)], y_test, color='lightgray', label='Actual (Test)')
+plt.plot(dataAll.index[len(y_train)+look_back+1:len(y_train)+look_back+1+len(test_predict)], test_predict, color='blue', label='Predicted (Test)')
+
+plt.title('Accumulation LSTM Results')
+plt.xlabel('Year')
+plt.ylabel('Accumulation (cm)')
+plt.legend()
+plt.xticks(rotation=45)
+plt.tight_layout()
+plt.show()
